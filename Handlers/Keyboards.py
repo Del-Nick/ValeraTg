@@ -14,7 +14,6 @@ class Buttons:
     workshops: InlineKeyboardButton = InlineKeyboardButton(text='🔬 Праки', callback_data='start_workshops_main')
 
     schedule: InlineKeyboardButton = InlineKeyboardButton(text='📆 Расписание', callback_data='start_schedule')
-    # schedule: InlineKeyboardButton = InlineKeyboardButton(text='📆 Сессия', callback_data='start_session')
 
     settings: InlineKeyboardButton = InlineKeyboardButton(text='⚙ Настройки', callback_data='settings_main')
     headman: InlineKeyboardButton = InlineKeyboardButton(text='😎 Староста Mode', callback_data='headman_main')
@@ -61,6 +60,7 @@ def standard_keyboard(user: User):
         keyboard.row(b.homeworks, b.books)
 
     keyboard.row(b.schedule)
+    # keyboard.row(b.event)
 
     if user.settings.headman:
         keyboard.row(b.settings, b.headman)

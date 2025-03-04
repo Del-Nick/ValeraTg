@@ -18,8 +18,8 @@ from Handlers.Keyboards import standard_keyboard, custom_keyboard
 from Scripts.Others import remove_inline_keyboard
 from Scripts.RequestsToVK import get_vk_attachment
 from Scripts.ScheduleBuilder import weekdays
-from Server.Core import HomeworksDB
-from Server.Models import User, Homeworks
+from Server.Core import HomeworksDB, LessonScheduleDB, CustomLessonScheduleDB
+from Server.Models import User, Homeworks, CustomLesson, WeekType
 
 queue_homeworks: Queue = Queue()
 file_senders: set[tuple] = set()
@@ -118,283 +118,304 @@ async def headman_handler(bot: Bot, user: User, message: Message = None, callbac
         if user.action.startswith('headman_hwks'):
             await edit_homeworks_subjects(bot=bot, user=user, message=message)
 
-        elif callback.data.startswith('headman_schedule'):
+        elif user.action.startswith('headman_schedule'):
             await edit_custom_schedule(bot=bot, user=user, message=message)
 
 
-def get_prettytable_with_schedule(group: str, day: str, custom_schedule: dict, schedule: dict,
-                                  lesson: str = None, parity: str = None) -> PrettyTable:
-    try:
-        lesson_data = custom_schedule[group][day]
-    except KeyError:
-        try:
-            lesson_data = schedule[group][day]
-        except KeyError:
-            return None
-
-    if parity:
-        table = PrettyTable(hrules=ALL)
-        table.field_names = ['Предмет', 'Преп', 'Каб']
-        table._max_width = {"Предмет": 10, 'Преп': 10, "Каб.": 4}
-
-        if lesson in lesson_data.keys():
-            lesson_data = lesson_data[lesson]
-        else:
-            return None
-
-        if parity == 'odd' or parity == 'even':
-            row = [lesson_data[parity]["lesson"], lesson_data[parity]["teacher"], lesson_data[parity]["room"]]
-            for i, x in enumerate(row):
-                if x is None:
-                    row[i] = ''
-
-            table.add_row(row)
+async def get_prettytable_with_schedule(group: str, day: int,
+                                        num_lesson: int = None, week_type: WeekType = None) -> PrettyTable:
+    if num_lesson:
+        if week_type:
+            lessons = [await LessonScheduleDB.select_one_lesson(group_name=group, weekday=day,
+                                                                lesson_number=num_lesson, week_type=week_type)]
+            custom_lessons = [await CustomLessonScheduleDB.select_one_lesson(group_name=group, weekday=day,
+                                                                             lesson_number=num_lesson,
+                                                                             week_type=week_type)]
 
         else:
-            for _ in ['odd', 'even']:
-                row = [lesson_data[_]["lesson"], lesson_data[_]["teacher"], lesson_data[_]["room"]]
+            lessons = [await LessonScheduleDB.select_one_lesson(group_name=group, weekday=day,
+                                                                lesson_number=num_lesson, week_type=WeekType.ODD),
+                       await LessonScheduleDB.select_one_lesson(group_name=group, weekday=day,
+                                                                lesson_number=num_lesson, week_type=WeekType.EVEN)
+                       ]
 
-                for i, x in enumerate(row):
-                    if x is None:
-                        row[i] = ''
-
-                table.add_row(row)
-
-        return table
-
-    elif lesson:
-        table = PrettyTable(hrules=ALL)
-        table.field_names = ['Предмет', 'Преп', 'Каб']
-        table._max_width = {"Предмет": 10, 'Преп': 10, "Каб.": 4}
-
-        if lesson in lesson_data.keys():
-            lesson_data = lesson_data[lesson]
-        else:
-            return None
-
-        for _ in ['odd', 'even']:
-            row = [lesson_data[_]["lesson"], lesson_data[_]["teacher"], lesson_data[_]["room"]]
-
-            for i, x in enumerate(row):
-                if x is None:
-                    row[i] = ''
-
-            table.add_row(row)
-
-        return table
+            custom_lessons = [await CustomLessonScheduleDB.select_one_lesson(group_name=group, weekday=day,
+                                                                             lesson_number=num_lesson,
+                                                                             week_type=WeekType.ODD),
+                              await CustomLessonScheduleDB.select_one_lesson(group_name=group, weekday=day,
+                                                                             lesson_number=num_lesson,
+                                                                             week_type=WeekType.EVEN)
+                              ]
 
     else:
-        table = PrettyTable(hrules=ALL)
-        table.field_names = ['№', 'Предмет', 'Преп', 'Каб']
-        table._max_width = {'№': 2, "Предмет": 10, 'Преп': 8, "Каб.": 4}
+        lessons = await LessonScheduleDB.select(group_name=group, weekday=day, week_type=week_type)
+        custom_lessons = await CustomLessonScheduleDB.select(group_name=group, weekday=day, week_type=week_type)
 
-        for lesson in range(1, 7):
-            for _ in ['odd', 'even']:
-                row = [lesson,
-                       lesson_data[str(lesson)][_]["lesson"],
-                       lesson_data[str(lesson)][_]["teacher"],
-                       lesson_data[str(lesson)][_]["room"]]
+    for i, lesson in enumerate(lessons):
+        for custom_lesson in custom_lessons:
+            if custom_lesson:
+                if (custom_lesson.group_id == lesson.group_id and
+                        custom_lesson.weekday == lesson.weekday and
+                        custom_lesson.week_type == lesson.week_type and
+                        custom_lesson.lesson_number == lesson.lesson_number):
+                    lessons[i] = custom_lesson
 
-                for i, x in enumerate(row):
-                    if x is None:
-                        row[i] = ''
+    table = PrettyTable(hrules=ALL)
+    table.field_names = ['№', 'Предмет', 'Преп', 'Каб']
+    table._max_width = {'№': 1, "Предмет": 10, 'Преп': 9, "Каб.": 4}
 
-                table.add_row(row)
+    for i, lesson in enumerate(lessons):
+        if week_type:
+            if lesson.week_type == week_type:
+                table.add_row([lesson.lesson_number, lesson.lesson, lesson.teacher, lesson.room])
 
-        return table
+        else:
+            table.add_row([lesson.lesson_number, lesson.lesson, lesson.teacher, lesson.room])
+
+    return table
 
 
 async def edit_custom_schedule(bot: Bot, user: User, message: Message = None, callback: CallbackQuery = None):
-    custom_schedule_path = 'Files/Custom Schedule.json'
-    if not os.path.exists(custom_schedule_path):
-        custom_schedule = {}
-        with open(custom_schedule_path, 'w+', encoding='utf-8') as f:
-            json.dump(custom_schedule, f, ensure_ascii=False)
+    if callback:
+        if 'day' not in callback.data:
+            buttons = [(day, f'day={i}') for i, day in enumerate(weekdays)]
 
-    else:
-        with open(custom_schedule_path, 'r', encoding='utf-8') as f:
-            custom_schedule = json.load(f)
+            await callback.message.edit_text('Выбери день недели для редактирования',
+                                             reply_markup=custom_keyboard(callback_back_button='headman_main',
+                                                                          main_callback='headman_schedule',
+                                                                          buttons=buttons,
+                                                                          buttons_in_row=3).as_markup())
 
-    if os.path.exists('Files/Schedule.json'):
-        with open('Files/Schedule.json', 'r', encoding='utf-8') as f:
-            schedule = json.load(f)
+        elif 'lesson' not in callback.data:
+            day = int(re.search(r'day=\d', callback.data).group().replace('day=', ''))
+            buttons = [(str(lesson), f'lesson={lesson}') for lesson in range(1, 7)]
 
-        if callback:
-            if 'day' not in callback.data:
-                buttons = [(day, f'day={i}') for i, day in enumerate(weekdays)]
+            table = await get_prettytable_with_schedule(group=user.groups[0], day=day)
 
-                await callback.message.edit_text('Выбери день недели для редактирования',
-                                                 reply_markup=custom_keyboard(callback_back_button='headman_main',
-                                                                              main_callback='headman_schedule',
-                                                                              buttons=buttons,
-                                                                              buttons_in_row=3).as_markup())
+            await callback.message.edit_text(f'{weekdays[day].upper()}\n'
+                                             f'```\n{table}```\n'
+                                             f'Выбери номер пары для редактирования',
+                                             reply_markup=custom_keyboard(callback_back_button=f'headman_schedule',
+                                                                          main_callback=f'headman_schedule_day={day}',
+                                                                          buttons=buttons,
+                                                                          buttons_in_row=6).as_markup(),
+                                             parse_mode='MarkdownV2')
 
-            elif 'lesson' not in callback.data:
-                day = int(re.search(r'day=\d', callback.data).group().replace('day=', ''))
-                buttons = [(str(lesson), f'lesson={lesson}') for lesson in range(1, 7)]
+        elif 'parity' not in callback.data:
+            day = int(re.search(r'day=\d', callback.data).group().replace('day=', ''))
+            lesson = int(re.search(r'lesson=\d', callback.data).group().replace('lesson=', ''))
 
-                table = get_prettytable_with_schedule(group=user.groups[0], day=weekdays[day],
-                                                      schedule=schedule, custom_schedule=custom_schedule)
+            buttons = [('Чётная неделя', 'parity=even'),
+                       ('Нечётная неделя', 'parity=odd'),
+                       ('Нечередующаяся пара', 'parity=o+e')]
 
-                await callback.message.edit_text(f'{weekdays[day].upper()}\n'
-                                                 f'```\n{table}```\n'
-                                                 f'Выбери номер пары для редактирования',
-                                                 reply_markup=custom_keyboard(callback_back_button=f'headman_schedule',
-                                                                              main_callback=f'headman_schedule_day={day}',
-                                                                              buttons=buttons,
-                                                                              buttons_in_row=6).as_markup(),
-                                                 parse_mode='MarkdownV2')
+            table = await get_prettytable_with_schedule(group=user.groups[0], day=day, num_lesson=lesson)
+            if not table:
+                user.action = 'start'
+                await callback.message.edit_text('Я не смог найти расписания для твоей группы. '
+                                                 'Свяжись с разработчиками',
+                                                 reply_markup=standard_keyboard(user).as_markup())
+                return
 
-            elif 'parity' not in callback.data:
-                day = int(re.search(r'day=\d', callback.data).group().replace('day=', ''))
-                lesson = re.search(r'lesson=\d', callback.data).group().replace('lesson=', '')
+            await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
+                                             f'```\n{table}```\n\n'
+                                             f'Выбери чётность недели для редактирования',
+                                             reply_markup=custom_keyboard(
+                                                 callback_back_button=f'headman_schedule_day={day}',
+                                                 main_callback=f'headman_schedule_day={day}_lesson={lesson}',
+                                                 buttons=buttons,
+                                                 buttons_in_row=2).as_markup(),
+                                             parse_mode='MarkdownV2')
 
-                buttons = [('Чётная неделя', 'parity=even'),
-                           ('Нечётная неделя', 'parity=odd'),
-                           ('Нечередующаяся пара', 'parity=o+e')]
+        elif 'mode' not in callback.data:
+            day = int(re.search(r'day=\d', callback.data).group().replace('day=', ''))
+            lesson = int(re.search(r'lesson=\d', callback.data).group().replace('lesson=', ''))
+            parity = re.search(r'parity=[a-zA-Z+]{3,4}', callback.data).group().replace('parity=', '')
 
-                table = get_prettytable_with_schedule(group=user.groups[0], day=weekdays[day],
-                                                      schedule=schedule, custom_schedule=custom_schedule,
-                                                      lesson=lesson)
-                if not table:
-                    user.action = 'start'
-                    await callback.message.edit_text('Я не смог найти расписания для твоей группы. '
-                                                     'Свяжись с разработчиками',
-                                                     reply_markup=standard_keyboard(user).as_markup())
-                    return
-
-                await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
-                                                 f'```\n{table}```\n\n'
-                                                 f'Выбери чётность недели для редактирования',
-                                                 reply_markup=custom_keyboard(
-                                                     callback_back_button=f'headman_schedule_day={day}',
-                                                     main_callback=f'headman_schedule_day={day}_lesson={lesson}',
-                                                     buttons=buttons,
-                                                     buttons_in_row=2).as_markup(),
-                                                 parse_mode='MarkdownV2')
-
-            elif 'mode' not in callback.data:
-                day = int(re.search(r'day=\d', callback.data).group().replace('day=', ''))
-                lesson = re.search(r'lesson=\d', callback.data).group().replace('lesson=', '')
-                parity = re.search(r'parity=[a-zA-Z+]{3,4}', callback.data).group().replace('parity=', '')
-
-                table = get_prettytable_with_schedule(group=user.groups[0], day=weekdays[day],
-                                                      schedule=schedule, custom_schedule=custom_schedule,
-                                                      lesson=lesson, parity=parity)
-
-                buttons = [('Название', 'title'),
-                           ('Преподаватель', 'teacher'),
-                           ('Кабинет', 'room'),
-                           ('Всё целиком', 'all')]
-
-                await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
-                                                 f'```\n{table}```\n\n'
-                                                 f'Выбери, что именно будешь менять',
-                                                 reply_markup=custom_keyboard(
-                                                     callback_back_button=f'headman_schedule_day={day}_lesson={lesson}',
-                                                     buttons=buttons,
-                                                     main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
-                                                     buttons_in_row=2).as_markup(),
-                                                 parse_mode='MarkdownV2')
-
+            if parity == 'even':
+                week_type = WeekType.EVEN
+            elif parity == 'odd':
+                week_type = WeekType.ODD
             else:
-                day = int(re.search(r'day=\d', callback.data).group().replace('day=', ''))
-                lesson = re.search(r'lesson=\d', callback.data).group().replace('lesson=', '')
-                parity = re.search(r'parity=[a-zA-Z+]{3,4}', callback.data).group().replace('parity=', '')
-                mode = re.search(r'mode=[a-zA-Z+]{3,7}', callback.data).group().replace('mode=', '')
+                week_type = None
 
-                table = get_prettytable_with_schedule(group=user.groups[0], day=weekdays[day],
-                                                      schedule=schedule, custom_schedule=custom_schedule,
-                                                      lesson=lesson, parity=parity)
+            table = await get_prettytable_with_schedule(group=user.groups[0], day=day,
+                                                        num_lesson=lesson, week_type=week_type)
 
-                user.action = f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}'
+            buttons = [('Название', 'mode=title'),
+                       ('Преподаватель', 'mode=teacher'),
+                       ('Кабинет', 'mode=room'),
+                       ('Всё целиком', 'mode=all')]
 
-                match mode:
-                    case 'title':
-                        await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
-                                                         f'```\n{table}```\n\n'
-                                                         f'Введи другое название предмета',
-                                                         reply_markup=custom_keyboard(
-                                                             callback_back_button=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
-                                                             main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}',
-                                                             buttons_in_row=2).as_markup(),
-                                                         parse_mode='MarkdownV2')
-
-                    case 'teacher':
-                        await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
-                                                         f'```\n{table}```\n\n'
-                                                         f'Введи имя преподавателя',
-                                                         reply_markup=custom_keyboard(
-                                                             callback_back_button=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
-                                                             main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}',
-                                                             buttons_in_row=2).as_markup(),
-                                                         parse_mode='MarkdownV2')
-
-                    case 'room':
-                        await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
-                                                         f'```\n{table}```\n\n'
-                                                         f'Введи номер кабинета',
-                                                         reply_markup=custom_keyboard(
-                                                             callback_back_button=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
-                                                             main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}',
-                                                             buttons_in_row=2).as_markup(),
-                                                         parse_mode='MarkdownV2')
-
-                    case 'all':
-                        await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
-                                                         f'```\n{table}```\n\n'
-                                                         f'Введи новую пару по образцу:\n\n'
-                                                         f'*Название пары*\n'
-                                                         f'*Преподаватель*\n'
-                                                         f'*Номер набинета*\n\n'
-                                                         f'Для меня очень важны переходы на новую строку, не забывай об этом\\. '
-                                                         f'Если преподаватель или кабинет неизвестны, оставь пустую строку',
-                                                         reply_markup=custom_keyboard(
-                                                             callback_back_button=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
-                                                             main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}',
-                                                             buttons_in_row=2).as_markup(),
-                                                         parse_mode='MarkdownV2')
+            await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
+                                             f'```\n{table}```\n\n'
+                                             f'Выбери, что именно будешь менять',
+                                             reply_markup=custom_keyboard(
+                                                 callback_back_button=f'headman_schedule_day={day}_lesson={lesson}',
+                                                 buttons=buttons,
+                                                 main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
+                                                 buttons_in_row=2).as_markup(),
+                                             parse_mode='MarkdownV2')
 
         else:
-            if all([x in user.action for x in ['title', 'teacher', 'room', 'all']]):
-                day = int(re.search(r'day=\d', callback.data).group().replace('day=', ''))
-                lesson = re.search(r'lesson=\d', callback.data).group().replace('lesson=', '')
-                parity = re.search(r'parity=[a-zA-Z+]{3,4}', callback.data).group().replace('parity=', '')
-                mode = re.search(r'mode=[a-zA-Z+]{3,7}', callback.data).group().replace('mode=', '')
+            day = int(re.search(r'day=\d', callback.data).group().replace('day=', ''))
+            lesson = int(re.search(r'lesson=\d', callback.data).group().replace('lesson=', ''))
+            parity = re.search(r'parity=[a-zA-Z+]{3,4}', callback.data).group().replace('parity=', '')
+            mode = re.search(r'mode=[a-zA-Z+]{3,7}', callback.data).group().replace('mode=', '')
 
-                with open('../../Valera/Files/Schedule.json', 'r', encoding='utf-8') as f:
-                    custom_schedule = json.load(f)
+            if parity == 'even':
+                week_type = WeekType.EVEN
+            elif parity == 'odd':
+                week_type = WeekType.ODD
+            else:
+                week_type = None
 
-                user.action = 'headman_main'
+            table = await get_prettytable_with_schedule(group=user.groups[0], day=day,
+                                                        num_lesson=lesson, week_type=week_type)
 
-                if user.groups[0] not in custom_schedule.keys():
-                    custom_schedule[user.groups[0]] = {weekdays[day]:
-                        {lesson: {
-                            'even': {'lesson': '', 'room': '', 'teacher': ''},
-                            'odd': {'lesson': '', 'room': '', 'teacher': ''}}}}
+            user.action = f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}'
 
-                match mode:
-                    case 'title':
-                        custom_schedule[user.groups[0]][weekdays[day]][lesson][parity]['lesson'] = message.text
+            match mode:
+                case 'title':
+                    await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
+                                                     f'```\n{table}```\n\n'
+                                                     f'Введи другое название предмета',
+                                                     reply_markup=custom_keyboard(
+                                                         callback_back_button=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
+                                                         main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}',
+                                                         buttons_in_row=2).as_markup(),
+                                                     parse_mode='MarkdownV2')
 
-                        table = get_prettytable_with_schedule(group=user.groups[0], day=weekdays[day],
-                                                              schedule=schedule, custom_schedule=custom_schedule)
+                case 'teacher':
+                    await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
+                                                     f'```\n{table}```\n\n'
+                                                     f'Введи имя преподавателя',
+                                                     reply_markup=custom_keyboard(
+                                                         callback_back_button=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
+                                                         main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}',
+                                                         buttons_in_row=2).as_markup(),
+                                                     parse_mode='MarkdownV2')
 
-                        await message.answer(f'{weekdays[day].upper()}:\n'
-                                             f'```\n{table}```\n\n'
-                                             f'Отлично! Я запомнил новое название предмета',
-                                             reply_markup=kb.main_headman_keyboards().as_markup())
+                case 'room':
+                    await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
+                                                     f'```\n{table}```\n\n'
+                                                     f'Введи номер кабинета',
+                                                     reply_markup=custom_keyboard(
+                                                         callback_back_button=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
+                                                         main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}',
+                                                         buttons_in_row=2).as_markup(),
+                                                     parse_mode='MarkdownV2')
 
-                    case 'teacher':
-                        custom_schedule[user.groups[0]][weekdays[day]][lesson][parity]['teacher'] = message.text
+                case 'all':
+                    await callback.message.edit_text(f'{weekdays[day].upper()}, {lesson} ПАРА:\n'
+                                                     f'```\n{table}```\n\n'
+                                                     f'Введи новую пару по образцу:\n\n'
+                                                     f'*Название пары*\n'
+                                                     f'*Преподаватель*\n'
+                                                     f'*Номер набинета*\n\n'
+                                                     f'Для меня очень важны переходы на новую строку, не забывай об этом\\. '
+                                                     f'Если преподаватель или кабинет неизвестны, оставь пустую строку',
+                                                     reply_markup=custom_keyboard(
+                                                         callback_back_button=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}',
+                                                         main_callback=f'headman_schedule_day={day}_lesson={lesson}_parity={parity}_mode={mode}',
+                                                         buttons_in_row=2).as_markup(),
+                                                     parse_mode='MarkdownV2')
 
-                        table = get_prettytable_with_schedule(group=user.groups[0], day=weekdays[day],
-                                                              schedule=schedule, custom_schedule=custom_schedule)
+    else:
+        if any([x in user.action for x in ['title', 'teacher', 'room', 'all']]):
+            day = int(re.search(r'day=\d', user.action).group().replace('day=', ''))
+            lesson = int(re.search(r'lesson=\d', user.action).group().replace('lesson=', ''))
+            parity = re.search(r'parity=[a-zA-Z+]{3,4}', user.action).group().replace('parity=', '')
+            mode = re.search(r'mode=[a-zA-Z+]{3,7}', user.action).group().replace('mode=', '')
 
-                        await message.answer(f'{weekdays[day].upper()}:\n'
-                                             f'```\n{table}```\n\n'
-                                             f'Отлично! Я запомнил новое название предмета',
-                                             reply_markup=kb.main_headman_keyboards().as_markup())
+            if parity == 'even':
+                week_type = WeekType.EVEN
+            elif parity == 'odd':
+                week_type = WeekType.ODD
+            else:
+                week_type = None
+
+            user.action = 'headman_main'
+
+            match mode:
+                case 'title':
+                    if week_type is None:
+                        for week_type in [WeekType.EVEN, WeekType.ODD]:
+                            await update_custom_schedule_db(group_name=user.groups[0], day=day, lesson_number=lesson,
+                                                            week_type=week_type, title=message.text)
+
+                    else:
+                        await update_custom_schedule_db(group_name=user.groups[0], day=day, lesson_number=lesson,
+                                                        week_type=week_type, title=message.text)
+
+                case 'teacher':
+                    if week_type is None:
+                        for week_type in [WeekType.EVEN, WeekType.ODD]:
+                            await update_custom_schedule_db(group_name=user.groups[0], day=day, lesson_number=lesson,
+                                                            week_type=week_type, teacher=message.text)
+
+                    else:
+                        await update_custom_schedule_db(group_name=user.groups[0], day=day, lesson_number=lesson,
+                                                        week_type=week_type, teacher=message.text)
+
+            table = await get_prettytable_with_schedule(group=user.groups[0], day=day)
+
+            try:
+                await bot.edit_message_reply_markup(chat_id=message.chat.id,
+                                                    message_id=message.message_id - 2)
+            except TelegramBadRequest:
+                pass
+
+            buttons = [(str(lesson), f'lesson={lesson}') for lesson in range(1, 7)]
+
+            await message.answer(f'{weekdays[day].upper()}:\n'
+                                 f'```\n{table}```\n\n'
+                                 r'Отлично\! Я запомнил новое название предмета',
+                                 reply_markup=custom_keyboard(callback_back_button=f'headman_schedule',
+                                                              main_callback=f'headman_schedule_day={day}',
+                                                              buttons=buttons,
+                                                              buttons_in_row=6).as_markup(),
+                                 parse_mode='MarkdownV2')
+
+
+async def update_custom_schedule_db(group_name: str, day: int, lesson_number: int, week_type: WeekType,
+                                    title: str = None, teacher: str = None, room: str = None):
+    lesson = await LessonScheduleDB.select_one_lesson(group_name=group_name,
+                                                      weekday=day,
+                                                      lesson_number=lesson_number,
+                                                      week_type=week_type)
+
+    custom_lesson = await CustomLessonScheduleDB.select_one_lesson(group_name=group_name,
+                                                                   weekday=day,
+                                                                   lesson_number=lesson_number,
+                                                                   week_type=week_type)
+
+    if not custom_lesson:
+        custom_lesson = CustomLesson(weekday=day, lesson_number=lesson_number, week_type=week_type)
+
+    if title:
+        custom_lesson.lesson = title
+    else:
+        # Если создаётся впервые, то все поля пустые. Заполняем
+        if not custom_lesson.lesson:
+            custom_lesson.lesson = lesson.lesson
+
+    if teacher:
+        custom_lesson.teacher = teacher
+    else:
+        # Если создаётся впервые, то все поля пустые. Заполняем
+        if not custom_lesson.teacher:
+            custom_lesson.teacher = lesson.teacher
+
+    if room:
+        custom_lesson.lesson = room
+    else:
+        # Если создаётся впервые, то все поля пустые. Заполняем
+        if not custom_lesson.room:
+            custom_lesson.room = lesson.room
+
+    await CustomLessonScheduleDB.update_or_insert_one_lesson(lesson=custom_lesson,
+                                                             group_name=group_name)
 
 
 async def edit_homeworks_subjects(bot: Bot, user: User, message: Message = None, callback: CallbackQuery = None):

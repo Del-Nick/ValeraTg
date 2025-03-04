@@ -2,7 +2,6 @@ import asyncio
 import json
 import re
 import time
-from pprint import pprint
 
 import aiohttp
 import requests
@@ -11,6 +10,10 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from tqdm import tqdm
 from selenium.webdriver import Chrome, ChromeOptions
+
+from Scripts.ScheduleBuilder import weekdays
+from Server.Core import LessonScheduleDB
+from Server.Models import WeekType, Lesson
 
 chrome_options = Options()
 chrome_options.add_argument('--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) '
@@ -49,15 +52,13 @@ async def check_the_boundaries_for_URLs():
                 else:
                     pages_set.add(result)
 
-    pprint(pages)
-
 
 def get_dict_with_pages() -> dict:
-    '''
+    """
     Функция проверяет, на каких страницах есть расписание
     и возвращает список с последними номерами страниц
     :return:
-    '''
+    """
     pages = {}
     for course in range(1, 7):
         pages[course] = {}
@@ -165,6 +166,22 @@ def get_weekday(num_weekday: int) -> str:
     return weekdays[num_weekday]
 
 
+def remove_incorrect_gropes(line: list) -> list:
+    """
+    Исправляем группы типа "427 б" на "427б"
+    :param line: список элементов строки
+    :return: исправленный список элементов строки
+    """
+    for i, elem in enumerate(line):
+        incorrect_groups = re.findall(r'\d{3}\s{1,3}\w{1,2}', elem)
+        if incorrect_groups:
+            for incorrect_group in incorrect_groups:
+                correct_group = incorrect_group.replace(' ', '')
+                line[i] = line[i].replace(incorrect_group, correct_group)
+
+    return line
+
+
 def get_all_info_about_lesson(line: list, group: str, groups: list) -> dict:
     """
     Разбираем список из ячейки расписания на словарь типа
@@ -206,6 +223,20 @@ def get_all_info_about_lesson(line: list, group: str, groups: list) -> dict:
                     'odd': {'lesson': '',
                             'room': '',
                             'teacher': ''}}
+
+    # Бывают подписи типа "1 поток без 307 группы и астр. - "
+    matching = re.search(r'\d поток без \d{3} группы и астр. - ', line[0])
+    if matching:
+        found_group = re.search(r'\d{3}', matching.group()).group()
+        if group == found_group or group == f'{found_group[0]}01':
+            return {'even': {'lesson': '',
+                             'room': '',
+                             'teacher': ''},
+                    'odd': {'lesson': '',
+                            'room': '',
+                            'teacher': ''}}
+        else:
+            line[0] = line[0].replace(matching, '')
 
     # Бывают строки типа '303 - С/К по выбору, 340 - ФТД ', поэтому делаем проверку на такое
     if len(re.findall(r'\d{3}\w{0,2} - ', line[start_index])) > 1:
@@ -298,9 +329,9 @@ def do_initial_data_processing(url: str) -> tuple:
         if 'tdsmall1' in str(line):
             # Класс 'tdtime' отвечает за хранение времени пар, расположен перед ячейкой с расписанием
             if 'tdtime' in str(table_to_list[i - 1]):
-                new_line = new_line + '~even'
-            elif 'tdtime' in str(table_to_list[i - 2]):
                 new_line = new_line + '~odd'
+            elif 'tdtime' in str(table_to_list[i - 2]):
+                new_line = new_line + '~even'
 
         if 'tbody' in str(line):
             new_line = ''
@@ -308,9 +339,9 @@ def do_initial_data_processing(url: str) -> tuple:
                 'tdsmall1' in str(table_to_list[i - 1]) or 'tdsmall1' in str(table_to_list[i - 2])):
             # Внутри этого if проверяем, не додумался ли создатель расписания запихать разные условия для мигающих пар
             if 'tdtime' in str(table_to_list[i - 1]) or 'tdtime' in str(table_to_list[i - 2]):
-                new_line = new_line + '~even'
-            elif 'tdtime' in str(table_to_list[i - 3]) or 'tdtime' in str(table_to_list[i - 4]):
                 new_line = new_line + '~odd'
+            elif 'tdtime' in str(table_to_list[i - 3]) or 'tdtime' in str(table_to_list[i - 4]):
+                new_line = new_line + '~even'
 
         lines.append(new_line.split('~'))
 
@@ -383,12 +414,14 @@ def main():
     schedule = {}
     # Можно проверить, не изменилось ли количество страниц
     # pages = get_dict_with_pages()
-    pages = {1: {1: 9, 2: 9},
-             2: {1: 9, 2: 9},
+    pages = {1: {1: 10, 2: 10},
+             2: {1: 10, 2: 10},
              3: {1: 11, 2: 9},
              4: {1: 11, 2: 11},
              5: {1: 13, 2: 11},
              6: {1: 12, 2: 11}}
+
+    pages = {3: {1: 11}}
 
     # Общее количество страниц нужно только для progress bar
     total_pages = 0
@@ -403,7 +436,6 @@ def main():
                     url = f'http://ras.phys.msu.ru/table/{course}/{part}/{page}.htm'
 
                     lines, groups, all_groups = do_initial_data_processing(url)
-
                     for group in sorted(groups, key=len, reverse=True):
                         weekday = 'Понедельник'
                         schedule[group.lower()] = {weekday: {}}
@@ -423,70 +455,71 @@ def main():
                                 pass
 
                             else:
-                                if lesson not in schedule[group.lower()][weekday].keys():
-                                    schedule[group.lower()][weekday][lesson] = get_all_info_about_lesson(line, group,
-                                                                                                       all_groups)
+                                line = remove_incorrect_gropes(line)
 
-                                else:
-                                    temp = get_all_info_about_lesson(line, group, all_groups)
-                                    if 'even' in temp.keys():
-                                        if temp['even']['lesson'] != '':
-                                            schedule[group.lower()][weekday][lesson]['even'] = temp['even']
-                                    if 'odd' in temp.keys():
-                                        if temp['odd']['lesson'] != '':
-                                            schedule[group.lower()][weekday][lesson]['odd'] = temp['odd']
+                                # Сначала проверяем, есть ли вообще группы в строке
+                                groups_found = re.findall(r'\d{3}', ' '.join(line))
+                                # Если есть группы, то проверяем, есть ли та, для которой заполняется расписание
+                                checking = re.findall(re.escape(group) + r'[,+ ]', ' '.join(line))
+                                if not groups_found or 'без' in ' '.join(line):
+                                    checking = True
+
+                                if checking:
+                                    if lesson not in schedule[group.lower()][weekday].keys():
+                                        schedule[group.lower()][weekday][lesson] = get_all_info_about_lesson(
+                                            line, group, all_groups)
+
+                                    else:
+                                        temp = get_all_info_about_lesson(line, group, all_groups)
+                                        if 'even' in temp.keys():
+                                            if temp['even']['lesson'] != '':
+                                                if temp['even']['lesson'] == 'Иностранный язык':
+                                                    schedule[group.lower()][weekday][lesson]['even']['teacher'] += f' / {temp['even']['teacher']}'
+                                                    schedule[group.lower()][weekday][lesson]['even']['room'] += f' / {temp['even']['room']}'
+                                                else:
+                                                    schedule[group.lower()][weekday][lesson]['even'] = temp['even']
+                                        if 'odd' in temp.keys():
+                                            if temp['odd']['lesson'] != '':
+                                                if temp['odd']['lesson'] == 'Иностранный язык':
+                                                    schedule[group.lower()][weekday][lesson]['odd']['teacher'] += f' / {temp['odd']['teacher']}'
+                                                    schedule[group.lower()][weekday][lesson]['odd']['room'] += f' / {temp['odd']['room']}'
+                                                else:
+                                                    schedule[group.lower()][weekday][lesson]['odd'] = temp['odd']
 
                     pbar.update(1)
                     pbar.set_description(desc=url)
 
     schedule = fill_gaps(schedule)
-
-    pprint(schedule)
-
-    # with open('../Files/Schedule.json', mode='r', encoding='utf-8') as f:
-    #     old_schedule = json.load(f)
-
-    # pprint(schedule['204'])
-    # pprint(test(old_schedule, schedule))
-    save_schedule_to_json(schedule, filename='../Files/Schedule.json')
-    save_schedule_to_json(schedule, filename='../../Valera/Files/Schedule.json')
+    asyncio.run(schedule_to_db(schedule))
 
 
-def get_difference_between_new_and_old_schedule(old: dict, new: dict):
-    for group in list(old.keys())[:4]:
-        for day in old[group].keys():
-            for lesson in old[group][day].keys():
-                for parity in old[group][day][lesson].keys():
-                    old_set = {group, day, lesson, parity, tuple(old[group][day][lesson][parity].items())}
-                    try:
-                        new_set = {group, day, lesson, parity, tuple(new[group][day][lesson][parity].items())}
-                        if old_set != new_set:
-                            print(f'{group}     {old_set ^ new_set}')
+async def schedule_to_db(schedule: dict):
+    total_count = 0
+    for group in schedule.keys():
+        for i, weekday in enumerate(weekdays):
+            total_count += len(schedule[group][weekday].values())
 
-                    except KeyError:
-                        print(group, day, lesson)
-                        pprint(old[group][day])
-                        pprint(new[group][day])
-                        print()
+    with tqdm(total=total_count) as pbar:
+        for group in schedule.keys():
 
+            pbar.set_description(desc=f'Группа: {group}')
+            lessons = []
 
-def test(dict1, dict2):
-    differences = {}
+            for i, weekday in enumerate(weekdays):
+                for num_lesson in schedule[group][weekday].keys():
+                    for week_type in [WeekType.ODD, WeekType.EVEN]:
+                        if schedule[group][weekday][num_lesson][week_type.value]['lesson']:
+                            lesson = Lesson(weekday=i, lesson_number=int(num_lesson), week_type=week_type)
 
-    for key in set(dict1.keys()).union(dict2.keys()):
-        if key not in dict1:
-            differences[key] = {"status": "missing_in_first", "value": dict2[key]}
-        elif key not in dict2:
-            differences[key] = {"status": "missing_in_second", "value": dict1[key]}
-        else:
-            if isinstance(dict1[key], dict) and isinstance(dict2[key], dict):
-                nested_diff = test(dict1[key], dict2[key])
-                if nested_diff:
-                    differences[key] = nested_diff
-            elif dict1[key] != dict2[key]:
-                differences[key] = {"first": dict1[key], "second": dict2[key]}
+                            lesson.lesson = schedule[group][weekday][num_lesson][week_type.value]['lesson']
+                            lesson.teacher = schedule[group][weekday][num_lesson][week_type.value]['teacher']
+                            lesson.room = schedule[group][weekday][num_lesson][week_type.value]['room']
 
-    return differences
+                            lessons.append((lesson, group))
+
+                    pbar.update(1)
+
+            await LessonScheduleDB.update_or_insert_list_lessons(lessons=lessons)
 
 
 if __name__ == '__main__':

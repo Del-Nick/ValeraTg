@@ -10,6 +10,7 @@ from aiogram.types import Message, CallbackQuery
 
 from Admin.Admin import admin_handler
 from Config.Config import global_settings
+from Handlers.Event import event_handler
 from Handlers.Headman import headman_handler
 from Handlers.Keyboards import empty_keyboard, standard_keyboard
 from Handlers.Registration import registration
@@ -17,13 +18,13 @@ from Handlers.Settings import settings_handler
 from Handlers.StartMenu import back_to_start, start_menu
 from Scripts.FloorCabinetSearchEngine import check_rooms, rooms
 from Scripts.Others import remove_inline_keyboard
-from Server.Core import DB
+from Server.Core import DB, QuizUserDB
 from Server.Models import User, TgMessages
 
 bot = Bot(token=global_settings.main_token) if global_settings.MAIN_BOT else Bot(token=global_settings.test_bot_token)
 dp = Dispatcher()
 
-logger.add(sys.stderr, format="{time} {level} {message}", level="ERROR")
+logger.add('log.txt', format="{time} {level} {message}", level="ERROR")
 
 
 async def print_messages(user: User, message: Message = None, callback: CallbackQuery = None):
@@ -40,6 +41,11 @@ async def print_messages(user: User, message: Message = None, callback: Callback
 @dp.message(Command('start'))
 async def cmd_start(message: Message):
     user = await DB.select_manager(message)
+    quiz_user = await QuizUserDB.select(user_id=user.ID)
+
+    if quiz_user:
+        if not quiz_user.end_datetime:
+            return
 
     if not user.settings.pause:
         if user.groups:
@@ -56,6 +62,11 @@ async def cmd_start(message: Message):
 @dp.message(Command('valera'))
 async def cmd_valera(message: Message):
     user = await DB.select_manager(message)
+    quiz_user = await QuizUserDB.select(user_id=user.ID)
+
+    if quiz_user:
+        if not quiz_user.end_datetime:
+            return
 
     if not user.settings.pause:
         if user.groups:
@@ -74,6 +85,11 @@ async def cmd_valera(message: Message):
 @dp.message(Command('pause'))
 async def cmd_pause(message: Message):
     user = await DB.select_manager(message)
+    quiz_user = await QuizUserDB.select(user_id=user.ID)
+
+    if quiz_user:
+        if not quiz_user.end_datetime:
+            return
 
     if user.settings.pause:
         await message.answer(text='Я вернулся!',
@@ -149,6 +165,9 @@ async def callback_handler(callback: CallbackQuery):
 
         elif callback.data.startswith('admin'):
             await admin_handler(bot=bot, admin=user, callback=callback)
+
+        # elif callback.data.startswith('event'):
+        #     await event_handler(bot=bot, user=user, callback=callback)
 
     await print_messages(user, callback=callback)
     await DB.update_user(user)

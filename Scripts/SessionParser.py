@@ -94,9 +94,6 @@ def process_magistracy() -> list[Exam]:
     return session_schedule
 
 
-# session_schedule = process_specialitet()
-# pprint(session_schedule)
-
 session_schedule = [Exam(group='301',
                          name='Теоретическая механика',
                          teacher='Казаков К.А.',

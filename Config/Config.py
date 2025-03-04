@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from dotenv import find_dotenv, load_dotenv, dotenv_values
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
-load_dotenv(find_dotenv(".env"))
+load_dotenv(find_dotenv("dfg.env"))
 
 
 @dataclass
@@ -33,8 +33,10 @@ class GlobalSettings:
     def __init__(self):
         self.engine = create_async_engine(url=self.DATABASE_URL_asyncpg,
                                           echo=False,
-                                          pool_size=20,
-                                          max_overflow=0)
+                                          pool_size=15,
+                                          max_overflow=5,
+                                          pool_recycle=3600,
+                                          pool_timeout=10)
         self.session_factory = async_sessionmaker(self.engine)
         self.MAIN_BOT = False
 
