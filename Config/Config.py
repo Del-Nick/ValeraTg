@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from dotenv import find_dotenv, load_dotenv, dotenv_values
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
-load_dotenv(find_dotenv("dfg.env"))
+load_dotenv(find_dotenv(".env"))
 
 
 @dataclass
